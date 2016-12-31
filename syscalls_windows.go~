@@ -1,0 +1,111 @@
+// +build windows
+
+package water
+
+import (
+   "errors"
+	"fmt"
+	"net"
+	"syscall"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+)
+
+type Tun interface {
+	Read(ch chan []byte) error
+	Write(ch chan []byte) error
+	Close() error
+}
+
+const (
+	IPv6_HEADER_LENGTH = 40
+	TAPWIN32_MAX_REG_SIZE = 256
+	TUNTAP_COMPONENT_ID   = "tap0901"
+	ADAPTER_KEY           = `SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}`
+)
+
+var (
+	TAP_IOCTL_GET_MTU          = tap_control_code(3, 0)
+	TAP_IOCTL_SET_MEDIA_STATUS = tap_control_code(6, 0)
+	TAP_IOCTL_CONFIG_TUN       = tap_control_code(10, 0)
+)
+
+type tun struct {
+	mtu         int
+	device_path string
+	fd          syscall.Handle
+}
+
+func OpenTunTap(addr net.IP, network net.IP, mask net.IP) (Tun, error) {
+	t := new(tun)
+	id, err := getTuntapComponentId()
+	if err != nil {
+		return nil, err
+	}
+	t.device_path = fmt.Sprintf(`\\.\Global\%s.tap`, id)
+	name := syscall.StringToUTF16(t.device_path)
+	tuntap, err := syscall.CreateFile(
+		&name[0],
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_SYSTEM|syscall.FILE_FLAG_OVERLAPPED,
+		0)
+	if err != nil {
+		fmt.Println("here")
+		return nil, err
+	}
+	var returnLen uint32
+	var configTunParam []byte = append(addr, network...)
+	configTunParam = append(configTunParam, mask...)
+	fmt.Println(configTunParam)
+	configTunParam = []byte{10, 0, 0, 1, 10, 0, 0, 0, 255, 255, 255, 0}
+	if err = syscall.DeviceIoControl(
+		tuntap,
+		TAP_IOCTL_CONFIG_TUN,
+		&configTunParam[0],
+		uint32(len(configTunParam)),
+		&configTunParam[0],
+		uint32(len(configTunParam)),
+		&returnLen,
+		nil); err != nil {
+		fmt.Println("here2")
+		return nil, err
+	}
+
+	// get MTU
+	// var umtu = make([]byte, 4)
+	// if err = syscall.DeviceIoControl(
+	// 	tuntap,
+	// 	TAP_IOCTL_GET_MTU,
+	// 	nil,
+	// 	0,
+	// 	&umtu[0],
+	// 	uint32(len(umtu)),
+	// 	&returnLen,
+	// 	nil); err != nil {
+	// 	fmt.Println("here3")
+	// 	return nil, err
+	// }
+	// mtu := binary.LittleEndian.Uint32(umtu)
+	mtu := 1500
+
+	// set connect.
+	inBuffer := []byte("\x01\x00\x00\x00")
+	if err = syscall.DeviceIoControl(
+		tuntap,
+		TAP_IOCTL_SET_MEDIA_STATUS,
+		&inBuffer[0],
+		uint32(len(inBuffer)),
+		&inBuffer[0],
+		uint32(len(inBuffer)),
+		&returnLen,
+		nil); err != nil {
+		return nil, err
+	}
+	t.fd = tuntap
+	t.mtu = int(mtu)
+	return t, nil
+}
